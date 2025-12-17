@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="SecureThing Store - Premium transparent electronics and accessories. Experience the future of shopping.">
+    <meta name="description" content="Liquid Store - Premium transparent electronics and accessories. Experience the future of shopping.">
     <meta name="theme-color" content="#050505">
-    <title>SecureThing Store | Premium Experience</title>
+    <title>Liquid Store | Premium Experience</title>
     
     <!-- Fonts & Icons -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
@@ -53,11 +53,12 @@
         window.state = {
             user: null,
             role: 'guest',
-            cart: JSON.parse(localStorage.getItem('SecureThing_cart')) || [],
-            lastViewedCategory: localStorage.getItem('SecureThing_pref_cat') || 'Electronics',
+            cart: JSON.parse(localStorage.getItem('liquid_cart')) || [],
+            lastViewedCategory: localStorage.getItem('liquid_pref_cat') || 'Electronics',
             currentView: 'home',
             products: [],
-            userAddress: null
+            userAddress: null,
+            currentEditingProduct: null
         };
 
         // --- UI MANAGERS ---
@@ -73,10 +74,11 @@
             auth: document.getElementById('auth-modal'),
             productModal: document.getElementById('product-modal'),
             ratingModal: document.getElementById('rating-modal'),
-            checkoutModal: document.getElementById('checkout-modal')
+            checkoutModal: document.getElementById('checkout-modal'),
+            editProductModal: document.getElementById('edit-product-modal')
         };
 
-        // --- UTILITIES: TOAST & LOADER ---
+        // --- UTILITIES ---
         window.showToast = (msg, type = 'info') => {
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
@@ -84,12 +86,14 @@
             const colors = {
                 success: 'bg-green-500 text-black',
                 error: 'bg-red-500 text-white',
-                info: 'bg-cyan-500 text-black'
+                info: 'bg-cyan-500 text-black',
+                warning: 'bg-yellow-500 text-black'
             };
             const icons = {
                 success: 'check-circle',
                 error: 'exclamation-circle',
-                info: 'info-circle'
+                info: 'info-circle',
+                warning: 'exclamation-triangle'
             };
 
             toast.className = `${colors[type]} px-6 py-3 rounded-xl shadow-2xl flex items-center gap-3 transform transition-all duration-300 translate-y-10 opacity-0`;
@@ -113,6 +117,25 @@
             else loader.classList.add('hidden');
         };
 
+        window.copyToClipboard = (text) => {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Copied to clipboard!', 'success');
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+                showToast('Failed to copy', 'error');
+            });
+        };
+
+        // --- ORDER ID SYSTEM ---
+        function generateOrderId() {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            let result = 'LQ-';
+            for (let i = 0; i < 8; i++) {
+                result += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return result;
+        }
+
         // --- AUTHENTICATION ---
         window.handleLogin = async (e) => {
             e.preventDefault();
@@ -127,7 +150,6 @@
                 toggleAuthModal(false);
                 showToast('Welcome back!', 'success');
                 
-                // Special admin detection for joykumbhakar101@gmail.com
                 if(email === 'joykumbhakar101@gmail.com') {
                     try {
                         const userDocRef = getDocRef("users", auth.currentUser.uid);
@@ -167,7 +189,6 @@
             try {
                 const cred = await createUserWithEmailAndPassword(auth, email, pass);
                 
-                // Check if email contains admin for demo
                 let userRole = 'customer';
                 if(email.includes('admin')) {
                     userRole = 'admin';
@@ -218,7 +239,6 @@
                             window.state.role = userData.role || 'customer';
                             window.state.userAddress = userData.address || null;
                             
-                            // Override for joykumbhakar101@gmail.com
                             if(user.email === 'joykumbhakar101@gmail.com') {
                                 window.state.role = 'admin';
                             }
@@ -243,7 +263,7 @@
         // --- NAVIGATION ---
         window.navigateTo = (viewName) => {
             Object.values(views).forEach(el => { 
-                if(el && el.id !== 'auth-modal' && el.id !== 'product-modal' && el.id !== 'rating-modal' && el.id !== 'checkout-modal') {
+                if(el && el.id !== 'auth-modal' && el.id !== 'product-modal' && el.id !== 'rating-modal' && el.id !== 'checkout-modal' && el.id !== 'edit-product-modal') {
                     el.classList.add('hidden'); 
                 }
             });
@@ -256,7 +276,6 @@
             window.state.currentView = viewName;
             renderNav();
             
-            // Route Specific Logic
             if(viewName === 'home') renderHome();
             if(viewName === 'shop') renderShop();
             if(viewName === 'categories') renderCategories();
@@ -287,7 +306,6 @@
             const inactiveClass = "text-white/70 hover:text-white transition hover:border-b-2 hover:border-white/30 border-transparent";
             const current = window.state.currentView;
 
-            // Updated links with Explore tab
             let links = [
                 { id: 'home', label: 'Home', icon: 'home' },
                 { id: 'explore', label: 'Explore', icon: 'compass' },
@@ -299,13 +317,11 @@
                 links.push({ id: 'profile', label: 'Account', icon: 'user' });
             }
 
-            // Desktop Render
             let desktopHtml = links.map(l => {
                 const label = l.id === 'cart' && l.badge > 0 ? `Cart (${l.badge})` : l.label;
                 return `<button onclick="navigateTo('${l.id}')" class="px-3 py-1.5 text-sm ${current === l.id ? activeClass : inactiveClass}">${label}</button>`;
             }).join('');
 
-            // Admin/Support Desktop Links
             if (window.state.role === 'admin') {
                 desktopHtml += `<button onclick="navigateTo('admin')" class="px-3 py-1.5 text-sm text-pink-400 font-bold hover:text-pink-300">Admin</button>`;
             }
@@ -320,7 +336,6 @@
             }
             navContainer.innerHTML = desktopHtml;
 
-            // Mobile Bottom Nav Render
             let bottomHtml = links.map(l => {
                 const isActive = current === l.id;
                 const colorClass = isActive ? 'text-cyan-400' : 'text-white/50 hover:text-white';
@@ -342,7 +357,6 @@
                 `;
             }).join('');
             
-            // Add Menu button for extra options
             if (!window.state.user || window.state.role === 'admin' || window.state.role === 'support') {
                  bottomHtml += `
                  <button onclick="toggleMobileMenu()" class="flex flex-col items-center justify-center w-full py-1 text-white/50 hover:text-white">
@@ -354,7 +368,6 @@
 
             bottomNavContainer.innerHTML = bottomHtml;
             
-            // Update Mobile Drawer Content
             const mobileDrawer = document.getElementById('mobile-nav-links');
             let drawerHtml = '';
             if(!window.state.user) {
@@ -389,6 +402,57 @@
             }
         }
 
+        // --- PRODUCT EDITING ---
+        window.openEditProductModal = (productId) => {
+            const product = window.state.products.find(p => p.id === productId);
+            if(!product) return;
+            
+            window.state.currentEditingProduct = productId;
+            
+            document.getElementById('edit-prod-id').value = productId;
+            document.getElementById('edit-prod-name').value = product.name;
+            document.getElementById('edit-prod-price').value = product.price;
+            document.getElementById('edit-prod-cat').value = product.category;
+            document.getElementById('edit-prod-img').value = product.image || '';
+            document.getElementById('edit-prod-desc').value = product.description || '';
+            
+            views.editProductModal.classList.remove('hidden');
+        };
+        
+        window.closeEditProductModal = () => {
+            views.editProductModal.classList.add('hidden');
+            window.state.currentEditingProduct = null;
+        };
+        
+        window.updateProduct = async (e) => {
+            e.preventDefault();
+            
+            const productId = document.getElementById('edit-prod-id').value;
+            const name = document.getElementById('edit-prod-name').value;
+            const price = parseFloat(document.getElementById('edit-prod-price').value);
+            const cat = document.getElementById('edit-prod-cat').value;
+            const img = document.getElementById('edit-prod-img').value;
+            const desc = document.getElementById('edit-prod-desc').value;
+
+            if(!name || !price || !cat) return showToast("Please fill required fields", "error");
+
+            setLoading(true);
+            try {
+                await updateDoc(getDocRef("products", productId), {
+                    name, price, category: cat, image: img, description: desc, updatedAt: new Date().toISOString()
+                });
+                
+                showToast("Product updated successfully!", "success");
+                closeEditProductModal();
+                loadProducts();
+                
+            } catch(err) { 
+                showToast("Failed to update product: " + err.message, "error"); 
+            } finally {
+                setLoading(false);
+            }
+        };
+
         // --- EXPLORE VIEW ---
         function renderExplore() {
             const container = document.getElementById('explore-container');
@@ -399,14 +463,12 @@
                 return;
             }
             
-            // Calculate stats
             const totalProducts = window.state.products.length;
             const totalRatings = window.state.products.reduce((sum, p) => sum + (p.ratings ? p.ratings.length : 0), 0);
             const avgRating = totalRatings > 0 
                 ? (window.state.products.reduce((sum, p) => sum + calculateAverageRating(p.ratings), 0) / totalProducts).toFixed(1)
                 : "0.0";
             
-            // Update stats
             statsContainer.innerHTML = `
                 <div class="glass-card p-4 rounded-xl text-center">
                     <div class="text-3xl font-bold mb-2">${totalProducts}</div>
@@ -422,7 +484,6 @@
                 </div>
             `;
             
-            // Show all products with rating option
             container.innerHTML = window.state.products.map(p => {
                 const avgRating = calculateAverageRating(p.ratings);
                 const ratingCount = p.ratings ? p.ratings.length : 0;
@@ -451,7 +512,7 @@
                                     <span class="text-sm font-bold">${avgRating.toFixed(1)}</span>
                                     <span class="text-white/50 text-sm">(${ratingCount} reviews)</span>
                                 </div>
-                                <p class="text-white/70 text-sm line-clamp-2">${p.description || "Premium product with SecureThing design aesthetics."}</p>
+                                <p class="text-white/70 text-sm line-clamp-2">${p.description || "Premium product with liquid design aesthetics."}</p>
                             </div>
                             
                             <div class="flex flex-wrap gap-3 mt-4">
@@ -499,25 +560,20 @@
         
         window.openRatingModal = (productId) => {
             currentRatingProductId = productId;
-            const modal = views.ratingModal;
-            modal.classList.remove('hidden');
+            views.ratingModal.classList.remove('hidden');
             
-            // Find product
             const product = window.state.products.find(p => p.id === productId);
             if(!product) return;
             
-            // Check if user already rated
             const existingRating = window.state.user && product.ratings ? 
                 product.ratings.find(r => r.userId === window.state.user.uid) : null;
             
             document.getElementById('rating-product-name').textContent = product.name;
             
-            // Set existing rating if exists
             if(existingRating) {
                 document.getElementById('star' + existingRating.stars).checked = true;
                 document.getElementById('rating-comment').value = existingRating.comment || '';
             } else {
-                // Default to 3 stars
                 document.getElementById('star3').checked = true;
                 document.getElementById('rating-comment').value = '';
             }
@@ -537,7 +593,6 @@
             
             if(!currentRatingProductId) return;
             
-            // Get selected rating
             const ratingInputs = document.querySelectorAll('input[name="rate"]');
             let selectedRating = 3;
             for(const input of ratingInputs) {
@@ -554,11 +609,9 @@
                 const productRef = getDocRef("products", currentRatingProductId);
                 const product = window.state.products.find(p => p.id === currentRatingProductId);
                 
-                // Remove existing rating from user if exists
                 let updatedRatings = product.ratings ? [...product.ratings] : [];
                 updatedRatings = updatedRatings.filter(r => r.userId !== window.state.user.uid);
                 
-                // Add new rating
                 updatedRatings.push({
                     userId: window.state.user.uid,
                     userEmail: window.state.user.email,
@@ -567,12 +620,10 @@
                     date: new Date().toISOString()
                 });
                 
-                // Update in Firestore
                 await updateDoc(productRef, {
                     ratings: updatedRatings
                 });
                 
-                // Update local state
                 const productIndex = window.state.products.findIndex(p => p.id === currentRatingProductId);
                 if(productIndex !== -1) {
                     window.state.products[productIndex].ratings = updatedRatings;
@@ -581,7 +632,6 @@
                 showToast('Thank you for your rating!', 'success');
                 closeRatingModal();
                 
-                // Refresh views
                 if(window.state.currentView === 'explore') renderExplore();
                 if(window.state.currentView === 'home') renderHome();
                 if(window.state.currentView === 'shop') renderShop();
@@ -607,10 +657,8 @@
                 return;
             }
             
-            // Show checkout modal
             views.checkoutModal.classList.remove('hidden');
             
-            // Load saved address if exists
             if(window.state.userAddress) {
                 document.getElementById('checkout-name').value = window.state.userAddress.name || '';
                 document.getElementById('checkout-phone').value = window.state.userAddress.phone || '';
@@ -620,7 +668,6 @@
                 document.getElementById('checkout-country').value = window.state.userAddress.country || 'US';
             }
             
-            // Calculate total
             const total = window.state.cart.reduce((sum, item) => sum + parseFloat(item.price), 0);
             document.getElementById('checkout-total').textContent = `$${total.toFixed(2)}`;
         };
@@ -630,7 +677,6 @@
         };
         
         window.submitCheckout = async () => {
-            // Get form values
             const name = document.getElementById('checkout-name').value.trim();
             const phone = document.getElementById('checkout-phone').value.trim();
             const street = document.getElementById('checkout-street').value.trim();
@@ -638,13 +684,11 @@
             const zip = document.getElementById('checkout-zip').value.trim();
             const country = document.getElementById('checkout-country').value;
             
-            // Validation
             if(!name || !phone || !street || !city || !zip) {
                 showToast('Please fill in all required fields', 'error');
                 return;
             }
             
-            // Validate phone number (basic validation)
             const phoneRegex = /^[\+]?[1-9][\d]{0,15}$/;
             if(!phoneRegex.test(phone.replace(/\D/g, ''))) {
                 showToast('Please enter a valid phone number', 'error');
@@ -663,37 +707,35 @@
                     updatedAt: new Date().toISOString()
                 };
                 
-                // Save address to user profile
                 await updateDoc(getDocRef("users", window.state.user.uid), {
                     address: addressData
                 });
                 
-                // Update local state
                 window.state.userAddress = addressData;
                 
-                // Create order
                 const total = window.state.cart.reduce((sum, item) => sum + parseFloat(item.price), 0);
+                const orderId = generateOrderId();
                 
                 const orderData = {
+                    orderId: orderId,
                     userId: window.state.user.uid,
                     email: window.state.user.email,
                     items: window.state.cart,
                     total: total,
                     shippingDetails: addressData,
                     status: "Pending", 
-                    date: new Date().toISOString()
+                    date: new Date().toISOString(),
+                    createdAt: new Date().toISOString()
                 };
                 
                 await addDoc(getCollectionRef("orders"), orderData);
                 
-                // Clear cart
                 window.state.cart = []; 
                 updateCartStorage();
                 
-                // Close modal
                 closeCheckoutModal();
                 
-                showToast("Order placed successfully!", "success");
+                showToast(`Order #${orderId} placed successfully!`, "success");
                 navigateTo('profile');
                 
             } catch(error) {
@@ -704,7 +746,7 @@
             }
         };
 
-        // --- ADMIN PANEL LOGIC ---
+        // --- ADMIN PANEL ---
         async function loadAdminOrders() {
             const container = document.getElementById('admin-orders');
             container.innerHTML = `<div class="text-center py-4 text-white/50 animate-pulse">Loading orders...</div>`;
@@ -719,16 +761,25 @@
                     container.innerHTML = snap.docs.map(d => {
                         const o = d.data();
                         const address = o.shippingDetails || {};
+                        const orderId = o.orderId || d.id.slice(0,8);
                         return `
                         <div class="glass-card p-5 rounded-xl mb-4 hover:bg-white/5 transition group">
-                            <!-- Order Header -->
+                            <!-- Order Header with Order ID -->
                             <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 pb-3 border-b border-white/5">
-                                <div>
-                                    <div class="flex items-center gap-2">
-                                        <span class="font-bold text-white">${o.email}</span>
-                                        <span class="text-xs text-white/40 bg-white/5 px-1.5 rounded">${new Date(o.date).toLocaleDateString()}</span>
+                                <div class="w-full md:w-auto">
+                                    <div class="flex flex-col md:flex-row md:items-center gap-2 mb-2">
+                                        <div class="flex items-center gap-2">
+                                            <span class="font-bold text-white">${o.email}</span>
+                                            <span class="text-xs text-white/40 bg-white/5 px-1.5 rounded">${new Date(o.date).toLocaleDateString()}</span>
+                                        </div>
+                                        <div class="flex items-center gap-2">
+                                            <span class="text-xs font-mono bg-cyan-500/20 text-cyan-300 px-2 py-1 rounded border border-cyan-500/30">Order #${orderId}</span>
+                                            <button onclick="copyToClipboard('${orderId}')" class="text-xs text-white/40 hover:text-cyan-400 transition" title="Copy Order ID">
+                                                <i class="fas fa-copy"></i>
+                                            </button>
+                                        </div>
                                     </div>
-                                    <p class="text-xs text-white/50 font-mono mt-1">Order ID: ${d.id.slice(0,8)}</p>
+                                    <div class="text-sm font-medium mt-1 text-cyan-300">$${o.total.toFixed(2)} <span class="text-white/40 text-xs">(${o.items.length} items)</span></div>
                                 </div>
                                 <div class="flex items-center gap-3 mt-2 md:mt-0">
                                     <span class="text-xs px-2 py-1 rounded font-medium ${getStatusColor(o.status)}">${o.status}</span>
@@ -737,6 +788,7 @@
                                         <option value="Processing" ${o.status==='Processing'?'selected':''}>Processing</option>
                                         <option value="Shipped" ${o.status==='Shipped'?'selected':''}>Shipped</option>
                                         <option value="Delivered" ${o.status==='Delivered'?'selected':''}>Delivered</option>
+                                        <option value="Cancelled" ${o.status==='Cancelled'?'selected':''}>Cancelled</option>
                                     </select>
                                 </div>
                             </div>
@@ -804,7 +856,14 @@
                             <p class="text-xs text-yellow-400">⭐ ${calculateAverageRating(p.ratings).toFixed(1)} (${p.ratings ? p.ratings.length : 0})</p>
                         </div>
                     </div>
-                    <button onclick="deleteProduct('${p.id}')" class="text-white/30 hover:text-red-400 p-2 transition"><i class="fas fa-trash"></i></button>
+                    <div class="flex items-center gap-1">
+                        <button onclick="openEditProductModal('${p.id}')" class="text-white/30 hover:text-cyan-400 p-2 transition" title="Edit Product">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                        <button onclick="deleteProduct('${p.id}')" class="text-white/30 hover:text-red-400 p-2 transition" title="Delete Product">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -822,7 +881,9 @@
             setLoading(true);
             try {
                 await addDoc(getCollectionRef("products"), {
-                    name, price, category: cat, image: img, description: desc, ratings: [], createdAt: new Date().toISOString()
+                    name, price, category: cat, image: img, description: desc, ratings: [], 
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
                 });
                 showToast("Product added successfully!", "success");
                 e.target.reset();
@@ -875,6 +936,14 @@
                                 <div>
                                     <h4 class="font-bold text-lg">${ticket.subject}</h4>
                                     <p class="text-sm text-white/50">From: ${ticket.userEmail}</p>
+                                    ${ticket.orderId ? `
+                                        <div class="mt-1 flex items-center gap-2">
+                                            <span class="text-xs bg-cyan-500/20 text-cyan-300 px-2 py-0.5 rounded">Order #${ticket.orderId}</span>
+                                            <button onclick="copyToClipboard('${ticket.orderId}')" class="text-xs text-white/40 hover:text-cyan-400">
+                                                <i class="fas fa-copy"></i>
+                                            </button>
+                                        </div>
+                                    ` : ''}
                                 </div>
                                 <span class="px-3 py-1 rounded-full text-xs font-bold ${ticket.status === 'open' ? 'bg-cyan-500/20 text-cyan-400' : 'bg-green-500/20 text-green-400'}">
                                     ${ticket.status}
@@ -907,9 +976,10 @@
             
             const subject = document.getElementById('ticket-subject').value.trim();
             const message = document.getElementById('ticket-message').value.trim();
+            const orderId = document.getElementById('ticket-order-id').value.trim();
             
             if(!subject || !message) {
-                showToast('Please fill all fields', 'error');
+                showToast('Please fill all required fields', 'error');
                 return;
             }
             
@@ -918,6 +988,7 @@
                 await addDoc(getCollectionRef("support_tickets"), {
                     userId: window.state.user.uid,
                     userEmail: window.state.user.email,
+                    orderId: orderId || null,
                     subject: subject,
                     message: message,
                     status: 'open',
@@ -926,6 +997,7 @@
                 
                 document.getElementById('ticket-subject').value = '';
                 document.getElementById('ticket-message').value = '';
+                document.getElementById('ticket-order-id').value = '';
                 showToast('Support ticket submitted successfully!', 'success');
                 
                 if(window.state.role === 'support' || window.state.role === 'admin') {
@@ -964,11 +1036,9 @@
             }
         };
 
-
         // --- CUSTOMER LOGIC ---
-        
         function updateCartStorage() {
-            localStorage.setItem('SecureThing_cart', JSON.stringify(window.state.cart));
+            localStorage.setItem('liquid_cart', JSON.stringify(window.state.cart));
             renderNav();
         }
 
@@ -993,7 +1063,6 @@
                 grid.innerHTML = `<div class="col-span-full text-center text-white/30 py-10">Store is updating...</div>`;
                 return;
             }
-            // Sort by highest rated
             const products = [...window.state.products]
                 .sort((a, b) => calculateAverageRating(b.ratings) - calculateAverageRating(a.ratings))
                 .slice(0, 3);
@@ -1034,7 +1103,7 @@
             } else {
                 grid.innerHTML = filtered.map(p => createProductCard(p)).join('');
             }
-            localStorage.setItem('SecureThing_pref_cat', cat);
+            localStorage.setItem('liquid_pref_cat', cat);
             window.state.lastViewedCategory = cat;
         };
 
@@ -1143,7 +1212,7 @@
                 if (docSnap.exists()) {
                     const p = {id: docSnap.id, ...docSnap.data()};
                     window.state.lastViewedCategory = p.category;
-                    localStorage.setItem('SecureThing_pref_cat', p.category);
+                    localStorage.setItem('liquid_pref_cat', p.category);
                     
                     const avgRating = calculateAverageRating(p.ratings);
                     const hasRated = window.state.user && p.ratings && p.ratings.some(r => r.userId === window.state.user.uid);
@@ -1169,7 +1238,7 @@
                                 </div>
                                 
                                 <p class="text-3xl font-mono text-white mb-6">$${p.price}</p>
-                                <p class="text-white/70 mb-8 leading-relaxed text-base font-light border-l-2 border-white/10 pl-4">${p.description || "Experience the essence of SecureThing design. This premium item offers transparency, durability, and a sleek aesthetic suitable for any modern lifestyle."}</p>
+                                <p class="text-white/70 mb-8 leading-relaxed text-base font-light border-l-2 border-white/10 pl-4">${p.description || "Experience the essence of liquid design. This premium item offers transparency, durability, and a sleek aesthetic suitable for any modern lifestyle."}</p>
                                 
                                 <div class="flex gap-4 mb-8">
                                     <button onclick="addToCart('${p.id}', '${p.name}', ${p.price}, '${p.image}')" class="flex-1 py-4 bg-white text-black font-bold text-lg rounded-xl hover:bg-cyan-50 transition shadow-lg shadow-white/5 transform active:scale-95">Add to Bag</button>
@@ -1217,6 +1286,7 @@
             views.productModal.classList.add('hidden');
             views.ratingModal.classList.add('hidden');
             views.checkoutModal.classList.add('hidden');
+            views.editProductModal.classList.add('hidden');
         };
 
         // --- ACCOUNT CENTER ---
@@ -1231,17 +1301,22 @@
                  if(snap.empty) { container.innerHTML = '<p class="text-center text-white/50 py-8">No orders yet.</p>'; return; }
                  container.innerHTML = snap.docs.map(d => {
                      const o = d.data();
+                     const orderId = o.orderId || d.id.slice(0,8);
                      return `
                         <div class="glass-card p-5 rounded-xl mb-4 border border-white/5 hover:border-white/20 transition">
                             <div class="flex justify-between mb-4 pb-2 border-b border-white/5">
                                 <div>
-                                    <span class="font-bold text-white block">Order #${d.id.slice(0,8)}</span>
+                                    <div class="flex items-center gap-2 mb-1">
+                                        <span class="font-bold text-white">Order #${orderId}</span>
+                                        <button onclick="copyToClipboard('${orderId}')" class="text-xs text-white/40 hover:text-cyan-400 transition" title="Copy Order ID">
+                                            <i class="fas fa-copy"></i>
+                                        </button>
+                                    </div>
                                     <span class="text-xs text-white/50">${new Date(o.date).toLocaleDateString()}</span>
                                 </div>
                                 <span class="text-xs px-3 py-1 h-fit rounded-full font-bold ${getStatusColor(o.status)}">${o.status}</span>
                             </div>
                             
-                            <!-- Shipping Address -->
                             ${o.shippingDetails ? `
                             <div class="mb-4 bg-black/20 p-3 rounded-lg border border-white/5">
                                 <div class="flex items-center gap-2 mb-2 text-sm font-bold text-white/70">
@@ -1287,14 +1362,30 @@
                                     <span class="${o.status === 'Delivered' ? 'text-cyan-400' : ''}">Delivered</span>
                                 </div>
                             </div>
+                            
+                            <!-- Support Button -->
+                            <div class="mt-4 pt-4 border-t border-white/5">
+                                <button onclick="openSupportWithOrder('${orderId}')" class="w-full bg-white/5 hover:bg-white/10 px-4 py-2 rounded-lg text-sm font-medium transition border border-white/10 flex items-center justify-center gap-2">
+                                    <i class="fas fa-headset"></i>
+                                    <span>Get Support for This Order</span>
+                                </button>
+                            </div>
                         </div>`;
                  }).join('');
              });
         }
+        
+        window.openSupportWithOrder = (orderId) => {
+            navigateTo('support');
+            document.getElementById('ticket-order-id').value = orderId;
+            document.getElementById('ticket-subject').focus();
+        };
+        
         function getStatusColor(status) { 
             if(status==='Pending') return 'bg-yellow-500/10 text-yellow-500 border border-yellow-500/20';
             if(status==='Processing') return 'bg-blue-500/10 text-blue-400 border border-blue-500/20';
             if(status==='Shipped') return 'bg-purple-500/10 text-purple-400 border border-purple-500/20';
+            if(status==='Cancelled') return 'bg-red-500/10 text-red-400 border border-red-500/20';
             return 'bg-green-500/10 text-green-400 border border-green-500/20'; 
         }
 
@@ -1336,7 +1427,7 @@
             border-top: 1px solid rgba(255,255,255,0.1);
         }
 
-        /* Star Rating Styles - From Uiverse.io */
+        /* Star Rating Styles */
         .rating:not(:checked) > input {
             position: absolute;
             appearance: none;
@@ -1420,7 +1511,7 @@
                     <!-- Brand -->
                     <div class="flex items-center gap-3 cursor-pointer group" onclick="navigateTo('home')">
                         <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-blue-600 shadow-lg shadow-cyan-500/20 group-hover:shadow-cyan-500/40 transition duration-300"></div>
-                        <h1 class="font-bold text-xl tracking-tight">SecureThing<span class="font-light text-white/70">Store</span></h1>
+                        <h1 class="font-bold text-xl tracking-tight">Liquid<span class="font-light text-white/70">Store</span></h1>
                     </div>
 
                     <!-- Desktop Nav Links -->
@@ -1433,7 +1524,7 @@
         <div class="md:hidden sticky top-0 z-40 glass-panel px-4 h-14 flex items-center justify-between">
              <div class="flex items-center gap-2 cursor-pointer" onclick="navigateTo('home')">
                 <div class="w-6 h-6 rounded-md bg-gradient-to-br from-cyan-400 to-blue-600"></div>
-                <h1 class="font-bold text-lg tracking-tight">SecureThing<span class="font-light text-white/70">Store</span></h1>
+                <h1 class="font-bold text-lg tracking-tight">Liquid<span class="font-light text-white/70">Store</span></h1>
             </div>
             <!-- Cart shortcut -->
             <button onclick="navigateTo('cart')" class="relative p-2 text-white/80">
@@ -1449,6 +1540,8 @@
                 <!-- Hero Section -->
                 <div class="text-center mb-12 mt-4 md:mt-16">
                     <span class="text-cyan-400 text-xs font-bold uppercase tracking-[0.2em] mb-4 block animate-pulse">New Collection 2025</span>
+                    <h2 class="text-4xl md:text-8xl font-bold mb-4 tracking-tighter bg-clip-text text-transparent bg-gradient-to-b from-white to-white/50">Fluid Design.</h2>
+                    <p class="text-white/60 text-base md:text-xl max-w-xl mx-auto mb-8 leading-relaxed">Experience the next generation of transparent technology. Aesthetics meeting performance in perfect harmony.</p>
                     <div class="flex justify-center gap-4">
                         <button onclick="navigateTo('explore')" class="bg-white text-black px-6 py-3 md:px-8 md:py-4 rounded-full font-bold hover:bg-cyan-50 transition shadow-xl shadow-white/5 transform hover:scale-105 duration-200 text-sm md:text-base">Explore Products</button>
                     </div>
@@ -1555,6 +1648,24 @@
                     <span class="bg-pink-500/20 text-pink-300 px-3 py-1 rounded text-xs font-bold uppercase border border-pink-500/30">Admin Access</span>
                 </div>
                 
+                <!-- Search & Stats -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                    <div class="lg:col-span-2">
+                        <div class="glass-card p-4 rounded-xl">
+                            <div class="flex items-center gap-3">
+                                <i class="fas fa-search text-cyan-400"></i>
+                                <input type="text" id="admin-search" placeholder="Search orders by ID or email..." class="w-full bg-transparent border-none outline-none text-white placeholder-white/30">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="lg:col-span-1">
+                        <div class="glass-card p-4 rounded-xl text-center">
+                            <div class="text-2xl font-bold mb-1" id="total-orders">0</div>
+                            <div class="text-white/50 text-sm">Total Orders</div>
+                        </div>
+                    </div>
+                </div>
+                
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
                     <!-- Left: Product Management -->
                     <div class="space-y-8">
@@ -1563,7 +1674,7 @@
                             <form onsubmit="handleAddProduct(event)" class="space-y-4">
                                 <div>
                                     <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Product Name</label>
-                                    <input id="new-prod-name" type="text" placeholder="e.g. SecureThing Case" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition">
+                                    <input id="new-prod-name" type="text" placeholder="e.g. Liquid Case" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition">
                                 </div>
                                 <div class="flex gap-4">
                                     <div class="w-1/2">
@@ -1576,6 +1687,8 @@
                                             <option value="Electronics">Electronics</option>
                                             <option value="Accessories">Accessories</option>
                                             <option value="Fashion">Fashion</option>
+                                            <option value="Home">Home</option>
+                                            <option value="Office">Office</option>
                                         </select>
                                     </div>
                                 </div>
@@ -1592,7 +1705,10 @@
                         </div>
                         
                         <div class="glass-panel p-6 rounded-2xl">
-                            <h3 class="font-bold mb-4">Inventory List</h3>
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold">Inventory List</h3>
+                                <span class="text-xs text-white/50">${window.state.products.length} products</span>
+                            </div>
                             <div id="admin-product-list" class="max-h-60 overflow-y-auto custom-scrollbar"></div>
                         </div>
                     </div>
@@ -1630,14 +1746,19 @@
                             <h3 class="font-bold mb-6 flex items-center gap-2"><i class="fas fa-question-circle"></i> Need Help?</h3>
                             <div class="space-y-4">
                                 <div>
-                                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Subject</label>
-                                    <input id="ticket-subject" type="text" placeholder="Issue with order..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition">
+                                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Order ID (Optional)</label>
+                                    <input id="ticket-order-id" type="text" placeholder="LQ-XXXXXX" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition">
                                 </div>
                                 <div>
-                                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Message</label>
-                                    <textarea id="ticket-message" rows="4" placeholder="Describe your issue..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition"></textarea>
+                                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Subject *</label>
+                                    <input id="ticket-subject" type="text" placeholder="Issue with order..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition" required>
+                                </div>
+                                <div>
+                                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Message *</label>
+                                    <textarea id="ticket-message" rows="4" placeholder="Describe your issue..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition" required></textarea>
                                 </div>
                                 <button onclick="submitSupportTicket()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white py-2.5 rounded-lg font-bold text-sm transition">Submit Ticket</button>
+                                <p class="text-xs text-white/30 text-center mt-2">Response time: 24-48 hours</p>
                             </div>
                         </div>
                     </div>
@@ -1686,9 +1807,9 @@
         
         <footer class="border-t border-white/5 mt-12 bg-black py-8 md:py-12 mb-16 md:mb-0">
             <div class="container mx-auto px-4 text-center">
-                <h3 class="font-bold text-xl mb-4">SecureThing<span class="font-light text-white/50">Store</span></h3>
+                <h3 class="font-bold text-xl mb-4">Liquid<span class="font-light text-white/50">Store</span></h3>
                 <p class="text-white/30 text-xs max-w-md mx-auto mb-8">Premium transparent electronics designed for the modern minimal aesthetic. Built with the future in mind.</p>
-                <p class="text-white/20 text-xs">&copy; 2025 SecureThing Store. All rights reserved.</p>
+                <p class="text-white/20 text-xs">&copy; 2025 Liquid Store. All rights reserved.</p>
             </div>
         </footer>
     </div>
@@ -1899,6 +2020,63 @@
             <div class="text-center mt-6 pt-6 border-t border-white/5">
                 <p class="text-xs text-white/30">By completing your purchase, you agree to our <a href="#" class="text-cyan-400 hover:text-cyan-300">Terms of Service</a> and <a href="#" class="text-cyan-400 hover:text-cyan-300">Privacy Policy</a>.</p>
             </div>
+        </div>
+    </div>
+
+    <!-- EDIT PRODUCT MODAL -->
+    <div id="edit-product-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-xl p-4 overflow-y-auto">
+        <div class="glass-card p-8 rounded-3xl w-full max-w-md relative shadow-2xl shadow-purple-900/20 border border-white/10 my-auto">
+            <button onclick="closeEditProductModal()" class="absolute top-6 right-6 text-white/30 hover:text-white transition"><i class="fas fa-times text-xl"></i></button>
+            
+            <div class="text-center mb-8">
+                <h2 class="text-2xl font-bold mb-2">Edit Product</h2>
+                <p class="text-white/50 text-sm">Update product details</p>
+            </div>
+            
+            <form onsubmit="updateProduct(event)" class="space-y-4">
+                <input type="hidden" id="edit-prod-id">
+                
+                <div>
+                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Product Name *</label>
+                    <input id="edit-prod-name" type="text" placeholder="e.g. Liquid Case" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition" required>
+                </div>
+                
+                <div class="flex gap-4">
+                    <div class="w-1/2">
+                        <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Price ($) *</label>
+                        <input id="edit-prod-price" type="number" step="0.01" placeholder="0.00" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition" required>
+                    </div>
+                    <div class="w-1/2">
+                        <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Category *</label>
+                        <select id="edit-prod-cat" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition" required>
+                            <option value="Electronics">Electronics</option>
+                            <option value="Accessories">Accessories</option>
+                            <option value="Fashion">Fashion</option>
+                            <option value="Home">Home</option>
+                            <option value="Office">Office</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <div>
+                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Image URL</label>
+                    <input id="edit-prod-img" type="url" placeholder="https://..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition">
+                </div>
+                
+                <div>
+                    <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Description</label>
+                    <textarea id="edit-prod-desc" rows="3" placeholder="Product details..." class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-purple-500 outline-none transition"></textarea>
+                </div>
+                
+                <div class="pt-4">
+                    <button type="submit" class="w-full bg-purple-600 hover:bg-purple-500 text-white py-3 rounded-lg font-bold text-sm transition">
+                        Update Product
+                    </button>
+                    <button type="button" onclick="closeEditProductModal()" class="w-full bg-white/5 hover:bg-white/10 text-white py-3 rounded-lg font-bold text-sm transition mt-2 border border-white/10">
+                        Cancel
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
