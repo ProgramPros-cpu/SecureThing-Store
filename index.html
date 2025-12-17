@@ -18,7 +18,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, query, where, orderBy, limit, setDoc, onSnapshot, deleteDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, query, where, orderBy, limit, setDoc, onSnapshot, deleteDoc, arrayUnion, serverTimestamp, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
 
         // --- FIREBASE CONFIGURATION ---
@@ -48,6 +48,8 @@
         // --- DATABASE PATH HELPERS ---
         const getCollectionRef = (colName) => collection(db, colName);
         const getDocRef = (colName, docId) => doc(db, colName, docId);
+        const getSupportChatRef = (chatId) => getDocRef("support_chats", chatId);
+        const getChatMessagesRef = (chatId) => collection(db, "support_chats", chatId, "messages");
 
         // --- GLOBAL STATE ---
         window.state = {
@@ -60,25 +62,28 @@
             userAddress: null,
             currentEditingProduct: null,
             authModalMode: 'login', // 'login', 'signup', 'reset'
-            userProfile: null
+            userProfile: null,
+            isAdminOnline: false,
+            currentChatId: null,
+            activeChatListener: null,
+            chatHistory: [],
+            waitingUsers: [],
+            activeSupportChats: []
         };
 
         // --- PROFILE PICTURE GENERATOR ---
         function getProfilePicture(gender, name) {
-            // Default avatar colors for different genders
             const colors = {
-                male: ['#3B82F6', '#1D4ED8', '#2563EB'], // Blue shades
-                female: ['#EC4899', '#DB2777', '#BE185D'], // Pink shades
-                other: ['#8B5CF6', '#7C3AED', '#6D28D9']  // Purple shades
+                male: ['#3B82F6', '#1D4ED8', '#2563EB'],
+                female: ['#EC4899', '#DB2777', '#BE185D'],
+                other: ['#8B5CF6', '#7C3AED', '#6D28D9']
             };
             
             const genderColors = colors[gender] || colors.other;
             const color = genderColors[Math.floor(Math.random() * genderColors.length)];
             
-            // Generate initials from name
             const initials = name ? name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2) : 'US';
             
-            // Create SVG avatar
             return `
                 <svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
                     <circle cx="50" cy="50" r="50" fill="${color}"/>
@@ -99,6 +104,7 @@
             admin: document.getElementById('view-admin'),
             support: document.getElementById('view-support'),
             explore: document.getElementById('view-explore'),
+            customercare: document.getElementById('view-customercare'),
             auth: document.getElementById('auth-modal'),
             productModal: document.getElementById('product-modal'),
             ratingModal: document.getElementById('rating-modal'),
@@ -157,7 +163,7 @@
         // --- ORDER ID SYSTEM ---
         function generateOrderId() {
             const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            let result = 'LQ-';
+            let result = 'ST-';
             for (let i = 0; i < 8; i++) {
                 result += chars.charAt(Math.floor(Math.random() * chars.length));
             }
@@ -175,12 +181,10 @@
             const signupForm = document.getElementById('auth-signup-form');
             const resetForm = document.getElementById('auth-reset-form');
             
-            // Hide all forms
             loginForm.classList.add('hidden');
             signupForm.classList.add('hidden');
             resetForm.classList.add('hidden');
             
-            // Show the active form
             switch(window.state.authModalMode) {
                 case 'login':
                     loginForm.classList.remove('hidden');
@@ -263,7 +267,6 @@
                     userRole = 'admin';
                 }
                 
-                // Generate profile picture based on gender and name
                 const profilePicture = getProfilePicture(gender, name);
                 
                 await setDoc(getDocRef("users", cred.user.uid), {
@@ -302,7 +305,6 @@
 
             setLoading(true);
             try {
-                // First verify if user exists with the given email and name
                 const userQuery = query(getCollectionRef("users"), where("email", "==", email));
                 const userSnapshot = await getDocs(userQuery);
                 
@@ -314,14 +316,12 @@
                 
                 const userData = userSnapshot.docs[0].data();
                 
-                // Verify the name matches
                 if(userData.name !== name) {
                     showToast('Name does not match our records. Please try again.', 'error');
                     setLoading(false);
                     return;
                 }
                 
-                // Send password reset email
                 await sendPasswordResetEmail(auth, email);
                 showToast('Password reset email sent! Check your inbox.', 'success');
                 switchAuthMode('login');
@@ -344,6 +344,11 @@
                 window.state.role = 'guest';
                 window.state.userAddress = null;
                 window.state.userProfile = null;
+                window.state.currentChatId = null;
+                if(window.state.activeChatListener) {
+                    window.state.activeChatListener();
+                    window.state.activeChatListener = null;
+                }
                 renderNav();
                 navigateTo('home');
                 showToast('Signed out successfully', 'info');
@@ -373,6 +378,8 @@
                             
                             if(user.email === 'joykumbhakar101@gmail.com') {
                                 window.state.role = 'admin';
+                                // Setup admin status listener
+                                setupAdminStatusListener();
                             }
                         } else {
                             window.state.role = 'customer';
@@ -389,16 +396,80 @@
                     window.state.role = 'guest';
                     window.state.userAddress = null;
                     window.state.userProfile = null;
+                    window.state.currentChatId = null;
                 }
                 renderNav();
-                loadProducts(); 
+                loadProducts();
+                
+                // Setup admin availability listener if user is customer
+                if(window.state.user && window.state.role === 'customer') {
+                    setupAdminAvailabilityListener();
+                }
             });
+        }
+
+        // --- ADMIN AVAILABILITY LISTENER ---
+        function setupAdminStatusListener() {
+            const adminStatusRef = getDocRef("config", "admin_availability");
+            
+            onSnapshot(adminStatusRef, (doc) => {
+                if(doc.exists()) {
+                    window.state.isAdminOnline = doc.data().isOnline || false;
+                    updateAdminStatusUI();
+                    if(window.state.currentView === 'customercare') {
+                        updateSupportStatusUI();
+                    }
+                }
+            });
+        }
+
+        function setupAdminAvailabilityListener() {
+            const adminStatusRef = getDocRef("config", "admin_availability");
+            
+            onSnapshot(adminStatusRef, (doc) => {
+                if(doc.exists()) {
+                    window.state.isAdminOnline = doc.data().isOnline || false;
+                    if(window.state.currentView === 'customercare') {
+                        updateSupportStatusUI();
+                    }
+                }
+            });
+        }
+
+        function updateAdminStatusUI() {
+            const btn = document.getElementById('admin-status-toggle');
+            if(btn) {
+                btn.innerHTML = window.state.isAdminOnline ? 
+                    '<i class="fas fa-circle text-green-500 mr-2"></i> Online' : 
+                    '<i class="fas fa-circle text-gray-500 mr-2"></i> Offline';
+                btn.className = window.state.isAdminOnline ? 
+                    'bg-green-500/20 text-green-400 px-4 py-2 rounded-lg border border-green-500/30 flex items-center' :
+                    'bg-gray-500/20 text-gray-400 px-4 py-2 rounded-lg border border-gray-500/30 flex items-center';
+            }
+        }
+
+        function updateSupportStatusUI() {
+            const indicator = document.getElementById('support-status-indicator');
+            const text = document.getElementById('support-status-text');
+            
+            if(indicator && text) {
+                if(window.state.isAdminOnline) {
+                    indicator.className = 'w-2 h-2 rounded-full bg-green-500 animate-pulse';
+                    text.textContent = 'Experts online • Fast response';
+                    text.className = 'text-xs text-green-400';
+                } else {
+                    indicator.className = 'w-2 h-2 rounded-full bg-gray-500';
+                    text.textContent = 'Experts offline • Response in 24h';
+                    text.className = 'text-xs text-gray-400';
+                }
+            }
         }
 
         // --- NAVIGATION ---
         window.navigateTo = (viewName) => {
             Object.values(views).forEach(el => { 
-                if(el && el.id !== 'auth-modal' && el.id !== 'product-modal' && el.id !== 'rating-modal' && el.id !== 'checkout-modal' && el.id !== 'edit-product-modal') {
+                if(el && el.id !== 'auth-modal' && el.id !== 'product-modal' && el.id !== 'rating-modal' && 
+                   el.id !== 'checkout-modal' && el.id !== 'edit-product-modal') {
                     el.classList.add('hidden'); 
                 }
             });
@@ -419,6 +490,7 @@
             if(viewName === 'profile') loadUserProfile();
             if(viewName === 'admin') loadAdminPanel();
             if(viewName === 'support') loadSupportPanel();
+            if(viewName === 'customercare') initCustomerCare();
             
             window.scrollTo(0,0);
         };
@@ -430,7 +502,6 @@
                 views.auth.classList.remove('hidden');
             } else {
                 views.auth.classList.add('hidden');
-                // Clear form fields
                 document.getElementById('login-email').value = '';
                 document.getElementById('login-pass').value = '';
                 document.getElementById('signup-name').value = '';
@@ -463,6 +534,7 @@
             ];
 
             if (window.state.user) {
+                links.push({ id: 'customercare', label: 'Care', icon: 'headset' });
                 links.push({ id: 'profile', label: 'Account', icon: 'user' });
             }
 
@@ -1059,6 +1131,718 @@
             }
         };
 
+        // --- CUSTOMER CARE SYSTEM ---
+        window.initCustomerCare = () => {
+            if(!window.state.user) {
+                showToast('Please sign in to access customer care', 'info');
+                toggleAuthModal(true, 'login');
+                navigateTo('home');
+                return;
+            }
+            
+            // Update status UI
+            updateSupportStatusUI();
+            
+            // Load recent orders
+            loadRecentOrdersForChat();
+            
+            // Clear chat and show welcome
+            const chatContainer = document.getElementById('chat-messages');
+            chatContainer.innerHTML = '';
+            
+            // Show welcome message with options
+            addChatMessage('system', `Hello ${window.state.userProfile?.name || 'there'}! How can I help you today?`, [
+                {text: 'Order Status', action: 'check_order', icon: 'box'},
+                {text: 'Order Questions', action: 'order_questions', icon: 'question-circle'},
+                {text: 'Chat with Expert', action: 'chat_expert', icon: 'user-tie'}
+            ]);
+            
+            // Hide input initially
+            document.getElementById('chat-input-area').classList.add('hidden');
+        };
+
+        function addChatMessage(sender, message, options = null) {
+            const chatContainer = document.getElementById('chat-messages');
+            const messageDiv = document.createElement('div');
+            
+            if(sender === 'user') {
+                messageDiv.className = 'flex justify-end mb-4';
+                messageDiv.innerHTML = `
+                    <div class="bg-cyan-500 text-white rounded-2xl rounded-br-none px-4 py-3 max-w-[80%] animate-fade-in shadow-lg">
+                        <p class="text-sm">${message}</p>
+                    </div>
+                `;
+            } else if(sender === 'system') {
+                messageDiv.className = 'flex justify-start mb-4';
+                messageDiv.innerHTML = `
+                    <div class="bg-white/10 border border-white/5 rounded-2xl rounded-bl-none px-4 py-3 max-w-[80%] animate-fade-in">
+                        <p class="text-white/90 text-sm">${message}</p>
+                        ${options ? `
+                            <div class="flex flex-wrap gap-2 mt-3">
+                                ${options.map(opt => `
+                                    <button onclick="handleChatOption('${opt.action}')" 
+                                            class="bg-white/5 hover:bg-white/10 border border-white/10 px-3 py-2 rounded-lg text-xs flex items-center gap-2 transition-all duration-200 hover:scale-105">
+                                        <i class="fas fa-${opt.icon} text-cyan-400"></i>
+                                        ${opt.text}
+                                    </button>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            } else if(sender === 'admin') {
+                messageDiv.className = 'flex justify-start mb-4';
+                messageDiv.innerHTML = `
+                    <div class="bg-purple-500/20 border border-purple-500/30 rounded-2xl rounded-bl-none px-4 py-3 max-w-[80%] animate-fade-in">
+                        <div class="flex items-center gap-2 mb-1">
+                            <i class="fas fa-user-tie text-purple-400"></i>
+                            <span class="text-xs font-bold text-purple-300">Expert Support</span>
+                        </div>
+                        <p class="text-white/90 text-sm">${message}</p>
+                    </div>
+                `;
+            }
+            
+            chatContainer.appendChild(messageDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        window.handleChatOption = async (action) => {
+            if(action === 'check_order') {
+                addChatMessage('user', 'Check my order status');
+                await checkOrderStatus();
+            } else if(action === 'order_questions') {
+                addChatMessage('user', 'I have questions about my order');
+                showOrderQuestions();
+            } else if(action === 'chat_expert') {
+                addChatMessage('user', 'I want to chat with an expert');
+                startExpertChat();
+            } else if(action === 'cancel_order') {
+                addChatMessage('user', 'I want to cancel my order');
+                await handleOrderCancellation();
+            } else if(action === 'delivery_request') {
+                addChatMessage('user', 'I need delivery help');
+                showDeliveryOptions();
+            } else if(action === 'back_to_menu') {
+                initCustomerCare();
+            }
+        };
+
+        async function checkOrderStatus() {
+            try {
+                const q = query(getCollectionRef("orders"), 
+                    where("userId", "==", window.state.user.uid),
+                    orderBy("date", "desc"),
+                    limit(5));
+                
+                const snap = await getDocs(q);
+                
+                if(snap.empty) {
+                    addChatMessage('system', "You haven't placed any orders yet. Start shopping to see your order history here!");
+                } else {
+                    let response = "Here are your recent orders:<br><br>";
+                    
+                    snap.docs.forEach((doc, index) => {
+                        const order = doc.data();
+                        const orderDate = new Date(order.date).toLocaleDateString();
+                        const statusColor = getStatusColor(order.status).split(' ')[0];
+                        
+                        response += `
+                            <div class="mb-3 p-3 bg-white/5 rounded-lg border border-white/5">
+                                <div class="flex justify-between items-center mb-2">
+                                    <span class="font-bold text-sm">Order #${order.orderId || doc.id.slice(0,8)}</span>
+                                    <span class="text-xs px-2 py-1 rounded ${statusColor}">${order.status}</span>
+                                </div>
+                                <div class="text-xs text-white/70">
+                                    <div>Date: ${orderDate}</div>
+                                    <div>Total: $${order.total?.toFixed(2) || '0.00'}</div>
+                                    <div>Items: ${order.items?.length || 0}</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    
+                    addChatMessage('system', response, [
+                        {text: 'Order Questions', action: 'order_questions', icon: 'question-circle'},
+                        {text: 'Chat Expert', action: 'chat_expert', icon: 'user-tie'}
+                    ]);
+                }
+            } catch(error) {
+                console.error("Error checking orders:", error);
+                addChatMessage('system', "Sorry, I couldn't retrieve your orders. Please try again or chat with an expert.");
+            }
+        }
+
+        function showOrderQuestions() {
+            addChatMessage('system', 'What would you like to know about your order?', [
+                {text: 'Cancel Order', action: 'cancel_order', icon: 'times-circle'},
+                {text: 'Delivery Help', action: 'delivery_request', icon: 'truck'},
+                {text: 'Chat Expert', action: 'chat_expert', icon: 'user-tie'},
+                {text: 'Back', action: 'back_to_menu', icon: 'arrow-left'}
+            ]);
+        }
+
+        async function handleOrderCancellation() {
+            try {
+                const q = query(getCollectionRef("orders"), 
+                    where("userId", "==", window.state.user.uid),
+                    where("status", "in", ["Pending", "Processing"]),
+                    orderBy("date", "desc"),
+                    limit(1));
+                
+                const snap = await getDocs(q);
+                
+                if(snap.empty) {
+                    addChatMessage('system', "You don't have any orders that can be cancelled. Only orders with 'Pending' or 'Processing' status can be cancelled.");
+                    showOrderQuestions();
+                } else {
+                    const order = snap.docs[0];
+                    const orderData = order.data();
+                    
+                    addChatMessage('system', `
+                        I found your recent order: <b>#${orderData.orderId || order.id.slice(0,8)}</b><br>
+                        Status: <span class="${getStatusColor(orderData.status).split(' ')[0]} px-2 py-1 rounded text-xs">${orderData.status}</span><br>
+                        Total: $${orderData.total?.toFixed(2)}<br><br>
+                        Would you like to request cancellation for this order?
+                    `, [
+                        {text: 'Yes, Cancel Order', action: 'confirm_cancel', icon: 'check-circle'},
+                        {text: 'No, Go Back', action: 'order_questions', icon: 'arrow-left'}
+                    ]);
+                    
+                    // Store current order for cancellation
+                    window.state.pendingCancellation = { id: order.id, data: orderData };
+                }
+            } catch(error) {
+                console.error("Error checking cancellable orders:", error);
+                addChatMessage('system', "Sorry, I couldn't check your orders. Please chat with an expert for assistance.");
+            }
+        }
+
+        window.confirmOrderCancellation = async () => {
+            if(!window.state.pendingCancellation) return;
+            
+            setLoading(true);
+            try {
+                await updateDoc(getDocRef("orders", window.state.pendingCancellation.id), {
+                    status: "Cancelled",
+                    cancelledAt: new Date().toISOString()
+                });
+                
+                addChatMessage('system', `
+                    ✅ <b>Order #${window.state.pendingCancellation.data.orderId} has been cancelled.</b><br>
+                    A confirmation email has been sent to ${window.state.user.email}.<br>
+                    Refund will be processed within 5-7 business days.
+                `, [
+                    {text: 'Check Other Orders', action: 'check_order', icon: 'box'},
+                    {text: 'Back to Menu', action: 'back_to_menu', icon: 'home'}
+                ]);
+                
+                window.state.pendingCancellation = null;
+                
+            } catch(error) {
+                addChatMessage('system', "Sorry, I couldn't cancel your order. Please chat with an expert for assistance.");
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        function showDeliveryOptions() {
+            addChatMessage('system', 'What delivery assistance do you need?', [
+                {text: 'Update Address', action: 'update_address', icon: 'map-marker-alt'},
+                {text: 'Track Shipment', action: 'track_shipment', icon: 'map-pin'},
+                {text: 'Delivery Delay', action: 'delivery_delay', icon: 'clock'},
+                {text: 'Chat Expert', action: 'chat_expert', icon: 'user-tie'}
+            ]);
+        }
+
+        async function startExpertChat() {
+            if(!window.state.isAdminOnline) {
+                addChatMessage('system', `
+                    <div class="text-center py-4">
+                        <i class="fas fa-user-slash text-3xl text-gray-500 mb-3"></i>
+                        <p class="text-white/70">All experts are currently unavailable.</p>
+                        <p class="text-white/50 text-xs mt-2">Please try again later or leave a message below.</p>
+                    </div>
+                `);
+                
+                document.getElementById('chat-input-area').classList.remove('hidden');
+                document.getElementById('chat-input').placeholder = "Leave a message for our support team...";
+                return;
+            }
+            
+            // Create or get chat session
+            const chatId = window.state.user.uid + '_' + Date.now();
+            window.state.currentChatId = chatId;
+            
+            try {
+                await setDoc(getSupportChatRef(chatId), {
+                    userId: window.state.user.uid,
+                    userEmail: window.state.user.email,
+                    userName: window.state.userProfile?.name || 'Customer',
+                    status: 'waiting',
+                    createdAt: serverTimestamp(),
+                    lastUpdated: serverTimestamp(),
+                    type: 'expert_chat'
+                });
+                
+                addChatMessage('system', `
+                    <div class="text-center py-4">
+                        <i class="fas fa-user-tie text-3xl text-cyan-400 mb-3"></i>
+                        <p class="text-white/90 font-bold">Connecting you with an expert...</p>
+                        <p class="text-white/50 text-xs mt-2">Please wait while we connect you to our support team.</p>
+                    </div>
+                `);
+                
+                // Show input area
+                document.getElementById('chat-input-area').classList.remove('hidden');
+                document.getElementById('chat-input').placeholder = "Type your message to the expert...";
+                
+                // Setup real-time listener
+                setupChatListener(chatId);
+                
+            } catch(error) {
+                console.error("Error creating chat:", error);
+                addChatMessage('system', "Sorry, I couldn't start the chat. Please try again.");
+            }
+        }
+
+        function setupChatListener(chatId) {
+            // Remove existing listener
+            if(window.state.activeChatListener) {
+                window.state.activeChatListener();
+            }
+            
+            // Setup new listener
+            window.state.activeChatListener = onSnapshot(
+                getChatMessagesRef(chatId),
+                (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        if(change.type === 'added') {
+                            const message = change.doc.data();
+                            const sender = message.sender;
+                            const text = message.text;
+                            
+                            if(sender === 'admin' || sender === 'expert') {
+                                addChatMessage('admin', text);
+                            } else if(sender === 'user' && message.userId !== window.state.user.uid) {
+                                // This is our own message, already shown
+                            }
+                        }
+                    });
+                }
+            );
+        }
+
+        window.sendChatMessage = async () => {
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            
+            if(!message) return;
+            
+            // Add user message to UI
+            addChatMessage('user', message);
+            input.value = '';
+            
+            if(window.state.currentChatId) {
+                // Save to Firestore
+                try {
+                    await addDoc(getChatMessagesRef(window.state.currentChatId), {
+                        text: message,
+                        sender: 'user',
+                        userId: window.state.user.uid,
+                        timestamp: serverTimestamp()
+                    });
+                    
+                    // Update chat status
+                    await updateDoc(getSupportChatRef(window.state.currentChatId), {
+                        status: 'active',
+                        lastMessage: message,
+                        lastUpdated: serverTimestamp()
+                    });
+                    
+                } catch(error) {
+                    console.error("Error sending message:", error);
+                }
+            } else {
+                // No active chat, save as offline message
+                try {
+                    await addDoc(getCollectionRef("offline_messages"), {
+                        userId: window.state.user.uid,
+                        userEmail: window.state.user.email,
+                        userName: window.state.userProfile?.name || 'Customer',
+                        message: message,
+                        status: 'pending',
+                        createdAt: serverTimestamp()
+                    });
+                    
+                    addChatMessage('system', "Message saved! Our team will respond via email within 24 hours.");
+                    document.getElementById('chat-input-area').classList.add('hidden');
+                    
+                } catch(error) {
+                    console.error("Error saving offline message:", error);
+                }
+            }
+        };
+
+        function loadRecentOrdersForChat() {
+            if(!window.state.user) return;
+            
+            const container = document.getElementById('chat-order-history');
+            container.innerHTML = '<div class="text-center py-4 text-white/30 animate-pulse">Loading orders...</div>';
+            
+            const q = query(getCollectionRef("orders"), 
+                where("userId", "==", window.state.user.uid),
+                orderBy("date", "desc"),
+                limit(3));
+            
+            onSnapshot(q, (snap) => {
+                if(snap.empty) {
+                    container.innerHTML = '<p class="text-center text-white/30 text-sm py-4">No orders yet</p>';
+                    return;
+                }
+                
+                container.innerHTML = snap.docs.map(doc => {
+                    const order = doc.data();
+                    return `
+                        <div class="bg-white/5 p-3 rounded-lg mb-2 hover:bg-white/10 transition cursor-pointer" onclick="openOrderInChat('${order.orderId}')">
+                            <div class="flex justify-between items-center mb-1">
+                                <span class="text-xs font-bold">#${order.orderId.slice(0,8)}</span>
+                                <span class="text-xs px-2 py-0.5 rounded ${getStatusColor(order.status).split(' ')[0]}">${order.status}</span>
+                            </div>
+                            <div class="text-xs text-white/50">
+                                ${new Date(order.date).toLocaleDateString()} • $${order.total.toFixed(2)}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            });
+        }
+
+        window.openOrderInChat = (orderId) => {
+            addChatMessage('user', `I need help with order #${orderId}`);
+            addChatMessage('system', `I see you're asking about order <b>#${orderId}</b>. What would you like to know?`, [
+                {text: 'Status Update', action: 'check_order', icon: 'sync'},
+                {text: 'Cancel Request', action: 'cancel_order', icon: 'times-circle'},
+                {text: 'Delivery Help', action: 'delivery_request', icon: 'truck'},
+                {text: 'Chat Expert', action: 'chat_expert', icon: 'user-tie'}
+            ]);
+        };
+
+        // --- ADMIN CUSTOMER CARE MANAGEMENT ---
+        async function loadAdminCustomerCare() {
+            if(window.state.role !== 'admin') return;
+            
+            // Setup admin status toggle
+            const statusBtn = document.getElementById('admin-status-toggle');
+            if(statusBtn) {
+                statusBtn.onclick = async () => {
+                    const newStatus = !window.state.isAdminOnline;
+                    await updateDoc(getDocRef("config", "admin_availability"), {
+                        isOnline: newStatus,
+                        lastUpdated: serverTimestamp()
+                    });
+                    showToast(`You are now ${newStatus ? 'online' : 'offline'}`, 'success');
+                };
+            }
+            
+            // Load waiting users
+            loadWaitingUsers();
+            
+            // Load active chats
+            loadActiveChats();
+        }
+
+        function loadWaitingUsers() {
+            const container = document.getElementById('admin-waiting-users');
+            if(!container) return;
+            
+            const q = query(getCollectionRef("support_chats"), 
+                where("status", "==", "waiting"),
+                orderBy("createdAt", "desc"));
+            
+            onSnapshot(q, (snap) => {
+                window.state.waitingUsers = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                if(snap.empty) {
+                    container.innerHTML = `
+                        <div class="text-center py-8">
+                            <i class="fas fa-users text-3xl text-white/20 mb-3"></i>
+                            <p class="text-white/30">No users waiting</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                container.innerHTML = snap.docs.map(doc => {
+                    const chat = doc.data();
+                    const timeAgo = chat.createdAt ? getTimeAgo(chat.createdAt.toDate()) : 'Just now';
+                    
+                    return `
+                        <div class="bg-white/5 p-4 rounded-xl border border-cyan-500/20 mb-3 hover:bg-white/10 transition cursor-pointer" onclick="adminAcceptChat('${doc.id}')">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <h4 class="font-bold text-sm">${chat.userName || 'Customer'}</h4>
+                                    <p class="text-xs text-cyan-300">${chat.userEmail}</p>
+                                </div>
+                                <span class="text-xs bg-cyan-500/20 text-cyan-400 px-2 py-1 rounded animate-pulse">Waiting</span>
+                            </div>
+                            <div class="text-xs text-white/50 flex justify-between">
+                                <span>${timeAgo}</span>
+                                <button class="text-cyan-400 hover:text-cyan-300">
+                                    <i class="fas fa-comment-medical"></i> Accept
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            });
+        }
+
+        function loadActiveChats() {
+            const container = document.getElementById('admin-active-chats');
+            if(!container) return;
+            
+            const q = query(getCollectionRef("support_chats"), 
+                where("status", "in", ["active", "in_progress"]),
+                orderBy("lastUpdated", "desc"));
+            
+            onSnapshot(q, (snap) => {
+                window.state.activeSupportChats = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                
+                if(snap.empty) {
+                    container.innerHTML = `
+                        <div class="text-center py-8">
+                            <i class="fas fa-comments text-3xl text-white/20 mb-3"></i>
+                            <p class="text-white/30">No active chats</p>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                container.innerHTML = snap.docs.map(doc => {
+                    const chat = doc.data();
+                    const lastUpdate = chat.lastUpdated ? getTimeAgo(chat.lastUpdated.toDate()) : 'Recently';
+                    const messagePreview = chat.lastMessage ? 
+                        (chat.lastMessage.length > 30 ? chat.lastMessage.substring(0, 30) + '...' : chat.lastMessage) : 
+                        'No messages yet';
+                    
+                    return `
+                        <div class="bg-white/5 p-4 rounded-xl border border-white/10 mb-3 hover:bg-white/10 transition cursor-pointer" onclick="adminOpenChat('${doc.id}')">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <h4 class="font-bold text-sm">${chat.userName || 'Customer'}</h4>
+                                    <p class="text-xs text-white/70">${messagePreview}</p>
+                                </div>
+                                <span class="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded">Active</span>
+                            </div>
+                            <div class="text-xs text-white/50 flex justify-between">
+                                <span>${lastUpdate}</span>
+                                <button class="text-white/50 hover:text-white">
+                                    <i class="fas fa-external-link-alt"></i> Open
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            });
+        }
+
+        window.adminAcceptChat = async (chatId) => {
+            setLoading(true);
+            try {
+                await updateDoc(getSupportChatRef(chatId), {
+                    status: 'in_progress',
+                    adminId: window.state.user.uid,
+                    adminName: window.state.userProfile?.name || 'Admin',
+                    acceptedAt: serverTimestamp(),
+                    lastUpdated: serverTimestamp()
+                });
+                
+                showToast('Chat accepted successfully', 'success');
+                adminOpenChat(chatId);
+                
+            } catch(error) {
+                console.error("Error accepting chat:", error);
+                showToast('Failed to accept chat', 'error');
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        window.adminOpenChat = (chatId) => {
+            window.state.currentChatId = chatId;
+            
+            // Show chat modal
+            document.getElementById('admin-chat-modal').classList.remove('hidden');
+            
+            // Load chat info
+            loadChatInfo(chatId);
+            
+            // Load messages
+            loadChatMessages(chatId);
+            
+            // Setup message listener
+            setupAdminChatListener(chatId);
+        };
+
+        async function loadChatInfo(chatId) {
+            try {
+                const chatDoc = await getDoc(getSupportChatRef(chatId));
+                if(chatDoc.exists()) {
+                    const chatData = chatDoc.data();
+                    
+                    document.getElementById('admin-chat-user-name').textContent = chatData.userName || 'Customer';
+                    document.getElementById('admin-chat-user-email').textContent = chatData.userEmail;
+                    document.getElementById('admin-chat-status').textContent = chatData.status;
+                    document.getElementById('admin-chat-status').className = 
+                        chatData.status === 'waiting' ? 'bg-yellow-500/20 text-yellow-400 px-2 py-1 rounded text-xs' :
+                        chatData.status === 'active' ? 'bg-green-500/20 text-green-400 px-2 py-1 rounded text-xs' :
+                        'bg-blue-500/20 text-blue-400 px-2 py-1 rounded text-xs';
+                    
+                    // Load user orders
+                    const ordersQuery = query(getCollectionRef("orders"), 
+                        where("userId", "==", chatData.userId),
+                        orderBy("date", "desc"),
+                        limit(5));
+                    
+                    const ordersSnap = await getDocs(ordersQuery);
+                    const ordersContainer = document.getElementById('admin-chat-orders');
+                    
+                    if(ordersSnap.empty) {
+                        ordersContainer.innerHTML = '<p class="text-white/30 text-sm">No orders found</p>';
+                    } else {
+                        ordersContainer.innerHTML = ordersSnap.docs.map(doc => {
+                            const order = doc.data();
+                            return `
+                                <div class="bg-white/5 p-2 rounded mb-1">
+                                    <div class="flex justify-between text-xs">
+                                        <span class="font-bold">#${order.orderId}</span>
+                                        <span class="${getStatusColor(order.status).split(' ')[0]} px-1 rounded">${order.status}</span>
+                                    </div>
+                                    <div class="text-xs text-white/50">$${order.total.toFixed(2)} • ${new Date(order.date).toLocaleDateString()}</div>
+                                </div>
+                            `;
+                        }).join('');
+                    }
+                }
+            } catch(error) {
+                console.error("Error loading chat info:", error);
+            }
+        }
+
+        function loadChatMessages(chatId) {
+            const container = document.getElementById('admin-chat-messages');
+            container.innerHTML = '<div class="text-center py-8 text-white/30 animate-pulse">Loading messages...</div>';
+        }
+
+        function setupAdminChatListener(chatId) {
+            const container = document.getElementById('admin-chat-messages');
+            
+            const unsubscribe = onSnapshot(
+                getChatMessagesRef(chatId),
+                (snapshot) => {
+                    container.innerHTML = '';
+                    
+                    const messages = [];
+                    snapshot.forEach(doc => {
+                        messages.push({ id: doc.id, ...doc.data() });
+                    });
+                    
+                    // Sort by timestamp
+                    messages.sort((a, b) => (a.timestamp?.seconds || 0) - (b.timestamp?.seconds || 0));
+                    
+                    if(messages.length === 0) {
+                        container.innerHTML = '<p class="text-center text-white/30 py-8">No messages yet</p>';
+                        return;
+                    }
+                    
+                    messages.forEach(msg => {
+                        const messageDiv = document.createElement('div');
+                        const isAdmin = msg.sender === 'admin' || msg.sender === 'expert';
+                        
+                        messageDiv.className = isAdmin ? 'flex justify-end mb-3' : 'flex justify-start mb-3';
+                        messageDiv.innerHTML = `
+                            <div class="${isAdmin ? 'bg-cyan-500 text-white rounded-2xl rounded-br-none' : 'bg-white/10 border border-white/5 rounded-2xl rounded-bl-none'} px-4 py-3 max-w-[80%]">
+                                <div class="text-xs opacity-75 mb-1">${isAdmin ? 'You' : msg.userName || 'Customer'}</div>
+                                <p class="text-sm">${msg.text}</p>
+                                <div class="text-xs opacity-50 text-right mt-1">
+                                    ${msg.timestamp ? new Date(msg.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
+                                </div>
+                            </div>
+                        `;
+                        
+                        container.appendChild(messageDiv);
+                    });
+                    
+                    container.scrollTop = container.scrollHeight;
+                }
+            );
+            
+            // Store unsubscribe function
+            window.state.adminChatListener = unsubscribe;
+        }
+
+        window.adminSendChatMessage = async () => {
+            const input = document.getElementById('admin-chat-input');
+            const message = input.value.trim();
+            
+            if(!message || !window.state.currentChatId) return;
+            
+            try {
+                await addDoc(getChatMessagesRef(window.state.currentChatId), {
+                    text: message,
+                    sender: 'admin',
+                    adminId: window.state.user.uid,
+                    adminName: window.state.userProfile?.name || 'Admin',
+                    timestamp: serverTimestamp()
+                });
+                
+                await updateDoc(getSupportChatRef(window.state.currentChatId), {
+                    lastMessage: message,
+                    lastUpdated: serverTimestamp()
+                });
+                
+                input.value = '';
+                
+            } catch(error) {
+                console.error("Error sending admin message:", error);
+                showToast('Failed to send message', 'error');
+            }
+        };
+
+        window.closeAdminChat = () => {
+            document.getElementById('admin-chat-modal').classList.add('hidden');
+            
+            if(window.state.adminChatListener) {
+                window.state.adminChatListener();
+                window.state.adminChatListener = null;
+            }
+            
+            window.state.currentChatId = null;
+        };
+
+        // --- HELPER FUNCTIONS ---
+        function getTimeAgo(date) {
+            const seconds = Math.floor((new Date() - date) / 1000);
+            
+            let interval = Math.floor(seconds / 31536000);
+            if (interval >= 1) return interval + " years ago";
+            
+            interval = Math.floor(seconds / 2592000);
+            if (interval >= 1) return interval + " months ago";
+            
+            interval = Math.floor(seconds / 86400);
+            if (interval >= 1) return interval + " days ago";
+            
+            interval = Math.floor(seconds / 3600);
+            if (interval >= 1) return interval + " hours ago";
+            
+            interval = Math.floor(seconds / 60);
+            if (interval >= 1) return interval + " minutes ago";
+            
+            return "just now";
+        }
+
         // --- SUPPORT PANEL ---
         async function loadSupportPanel() {
             if(window.state.role !== 'support' && window.state.role !== 'admin') {
@@ -1174,6 +1958,20 @@
             if(window.state.role !== 'admin') return navigateTo('home');
             loadAdminOrders();
             loadAdminProducts();
+            loadAdminCustomerCare();
+            
+            // Initialize admin availability
+            try {
+                const adminStatusDoc = await getDoc(getDocRef("config", "admin_availability"));
+                if(!adminStatusDoc.exists()) {
+                    await setDoc(getDocRef("config", "admin_availability"), {
+                        isOnline: false,
+                        lastUpdated: serverTimestamp()
+                    });
+                }
+            } catch(error) {
+                console.error("Error initializing admin status:", error);
+            }
         }
 
         window.updateOrderStatus = async (id, status) => {
@@ -1467,8 +2265,8 @@
                                 <span>Rate Products</span>
                                 <i class="fas fa-star text-yellow-400"></i>
                             </button>
-                            <button onclick="navigateTo('support')" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium flex justify-between items-center transition">
-                                <span>Support</span>
+                            <button onclick="navigateTo('customercare')" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium flex justify-between items-center transition">
+                                <span>Customer Care</span>
                                 <i class="fas fa-headset"></i>
                             </button>
                             <button onclick="handleLogout()" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium text-red-400 flex justify-between items-center transition">
@@ -1562,9 +2360,16 @@
         }
         
         window.openSupportWithOrder = (orderId) => {
-            navigateTo('support');
-            document.getElementById('ticket-order-id').value = orderId;
-            document.getElementById('ticket-subject').focus();
+            navigateTo('customercare');
+            setTimeout(() => {
+                addChatMessage('user', `I need help with order #${orderId}`);
+                addChatMessage('system', `I see you're asking about order <b>#${orderId}</b>. What would you like to know?`, [
+                    {text: 'Status Update', action: 'check_order', icon: 'sync'},
+                    {text: 'Cancel Request', action: 'cancel_order', icon: 'times-circle'},
+                    {text: 'Delivery Help', action: 'delivery_request', icon: 'truck'},
+                    {text: 'Chat Expert', action: 'chat_expert', icon: 'user-tie'}
+                ]);
+            }, 500);
         };
         
         function getStatusColor(status) { 
@@ -1674,10 +2479,55 @@
         .line-clamp-1 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; }
         .line-clamp-2 { overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
         
-        /* Gender icons */
-        .gender-male { color: #3B82F6; }
-        .gender-female { color: #EC4899; }
-        .gender-other { color: #8B5CF6; }
+        /* Chat Styles */
+        .chat-bubble-user {
+            background: linear-gradient(135deg, #0ea5e9, #3b82f6);
+            color: white;
+            border-radius: 18px 18px 4px 18px;
+            padding: 12px 16px;
+            max-width: 80%;
+            margin-left: auto;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 8px rgba(14, 165, 233, 0.3);
+        }
+        
+        .chat-bubble-system {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: rgba(255, 255, 255, 0.9);
+            border-radius: 18px 18px 18px 4px;
+            padding: 12px 16px;
+            max-width: 80%;
+            margin-right: auto;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+        }
+        
+        .chat-bubble-admin {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+            color: white;
+            border-radius: 18px 18px 18px 4px;
+            padding: 12px 16px;
+            max-width: 80%;
+            margin-right: auto;
+            margin-bottom: 8px;
+            box-shadow: 0 2px 8px rgba(139, 92, 246, 0.3);
+        }
+        
+        /* Pulsing animation for waiting status */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .animate-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        /* Gradient backgrounds */
+        .bg-gradient-chat {
+            background: linear-gradient(135deg, rgba(14, 165, 233, 0.1), rgba(139, 92, 246, 0.1));
+        }
     </style>
 </head>
 <body class="selection:bg-cyan-500/30 selection:text-white">
@@ -1832,34 +2682,128 @@
                 </div>
             </div>
 
-            <!-- VIEW: ADMIN -->
-            <div id="view-admin" class="hidden">
-                <div class="flex justify-between items-center mb-8">
-                    <h2 class="text-3xl font-light">Admin <span class="font-bold">Dashboard</span></h2>
-                    <span class="bg-pink-500/20 text-pink-300 px-3 py-1 rounded text-xs font-bold uppercase border border-pink-500/30">Admin Access</span>
-                </div>
-                
-                <!-- Search & Stats -->
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-                    <div class="lg:col-span-2">
-                        <div class="glass-card p-4 rounded-xl">
-                            <div class="flex items-center gap-3">
-                                <i class="fas fa-search text-cyan-400"></i>
-                                <input type="text" id="admin-search" placeholder="Search orders by ID or email..." class="w-full bg-transparent border-none outline-none text-white placeholder-white/30">
+            <!-- VIEW: CUSTOMER CARE -->
+            <div id="view-customercare" class="hidden animate-fade-in max-w-6xl mx-auto">
+                <div class="flex flex-col lg:flex-row gap-8">
+                    <!-- Chat Interface -->
+                    <div class="w-full lg:w-2/3">
+                        <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-cyan-500 h-[600px] flex flex-col">
+                            <!-- Chat Header -->
+                            <div class="flex justify-between items-center mb-6 pb-4 border-b border-white/10">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
+                                        <i class="fas fa-headset text-white"></i>
+                                    </div>
+                                    <div>
+                                        <h2 class="text-xl font-bold">Customer Care</h2>
+                                        <div class="flex items-center gap-2">
+                                            <div id="support-status-indicator" class="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>
+                                            <span id="support-status-text" class="text-xs text-white/50">Checking availability...</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button onclick="navigateTo('home')" class="text-white/30 hover:text-white p-2 rounded-full hover:bg-white/5">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </div>
+
+                            <!-- Chat Messages Container -->
+                            <div id="chat-messages" class="flex-grow overflow-y-auto mb-4 p-2 custom-scrollbar space-y-4">
+                                <!-- Messages will be populated here -->
+                            </div>
+
+                            <!-- Chat Input Area -->
+                            <div id="chat-input-area" class="hidden">
+                                <div class="flex gap-2">
+                                    <input id="chat-input" type="text" placeholder="Type your message..." class="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/30 focus:outline-none focus:border-cyan-500 transition">
+                                    <button onclick="sendChatMessage()" class="bg-cyan-500 hover:bg-cyan-600 text-white px-6 rounded-xl font-medium transition">
+                                        <i class="fas fa-paper-plane"></i>
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
-                    <div class="lg:col-span-1">
-                        <div class="glass-card p-4 rounded-xl text-center">
-                            <div class="text-2xl font-bold mb-1" id="total-orders">0</div>
-                            <div class="text-white/50 text-sm">Total Orders</div>
+
+                    <!-- Quick Actions Sidebar -->
+                    <div class="w-full lg:w-1/3">
+                        <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-purple-500 mb-6">
+                            <h3 class="font-bold mb-4 flex items-center gap-2">
+                                <i class="fas fa-bolt text-purple-400"></i>
+                                Quick Actions
+                            </h3>
+                            <div class="space-y-3">
+                                <button onclick="handleChatOption('check_order')" class="w-full bg-white/5 hover:bg-white/10 p-4 rounded-xl text-left transition border border-white/10 group">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-purple-500/20 flex items-center justify-center text-purple-400">
+                                            <i class="fas fa-box"></i>
+                                        </div>
+                                        <div>
+                                            <h4 class="font-bold text-sm">Order Status</h4>
+                                            <p class="text-xs text-white/50">Track your orders</p>
+                                        </div>
+                                    </div>
+                                </button>
+
+                                <button onclick="handleChatOption('order_questions')" class="w-full bg-white/5 hover:bg-white/10 p-4 rounded-xl text-left transition border border-white/10 group">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">
+                                            <i class="fas fa-question-circle"></i>
+                                        </div>
+                                        <div>
+                                            <h4 class="font-bold text-sm">Order Questions</h4>
+                                            <p class="text-xs text-white/50">Get order help</p>
+                                        </div>
+                                    </div>
+                                </button>
+
+                                <button onclick="handleChatOption('chat_expert')" class="w-full bg-white/5 hover:bg-white/10 p-4 rounded-xl text-left transition border border-white/10 group">
+                                    <div class="flex items-center gap-3">
+                                        <div class="w-10 h-10 rounded-lg bg-green-500/20 flex items-center justify-center text-green-400">
+                                            <i class="fas fa-user-tie"></i>
+                                        </div>
+                                        <div>
+                                            <h4 class="font-bold text-sm">Chat with Expert</h4>
+                                            <p class="text-xs text-white/50">Live support</p>
+                                        </div>
+                                    </div>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Order History -->
+                        <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-cyan-500">
+                            <h3 class="font-bold mb-4 flex items-center gap-2">
+                                <i class="fas fa-history text-cyan-400"></i>
+                                Recent Orders
+                            </h3>
+                            <div id="chat-order-history" class="space-y-2">
+                                <!-- Recent orders will appear here -->
+                            </div>
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- VIEW: ADMIN -->
+            <div id="view-admin" class="hidden animate-fade-in">
+                <div class="flex justify-between items-center mb-8">
+                    <h2 class="text-3xl font-light">Admin <span class="font-bold">Dashboard</span></h2>
+                    <button id="admin-status-toggle" class="bg-gray-500/20 text-gray-400 px-4 py-2 rounded-lg border border-gray-500/30 flex items-center">
+                        <i class="fas fa-circle text-gray-500 mr-2"></i> Offline
+                    </button>
+                </div>
                 
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                    <!-- Left: Product Management -->
-                    <div class="space-y-8">
+                <!-- Admin Tabs -->
+                <div class="flex border-b border-white/10 mb-6">
+                    <button onclick="showAdminTab('products')" class="px-4 py-2 border-b-2 border-cyan-400 text-cyan-400 font-medium">Products</button>
+                    <button onclick="showAdminTab('orders')" class="px-4 py-2 text-white/70 hover:text-white transition">Orders</button>
+                    <button onclick="showAdminTab('support')" class="px-4 py-2 text-white/70 hover:text-white transition">Support Center</button>
+                </div>
+                
+                <!-- Products Tab -->
+                <div id="admin-products-tab" class="space-y-8">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <!-- Add Product Form -->
                         <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-purple-500">
                             <h3 class="font-bold mb-6 flex items-center gap-2"><i class="fas fa-plus-circle"></i> Add Product</h3>
                             <form onsubmit="handleAddProduct(event)" class="space-y-4">
@@ -1895,6 +2839,7 @@
                             </form>
                         </div>
                         
+                        <!-- Product List -->
                         <div class="glass-panel p-6 rounded-2xl">
                             <div class="flex justify-between items-center mb-4">
                                 <h3 class="font-bold">Inventory List</h3>
@@ -1903,14 +2848,45 @@
                             <div id="admin-product-list" class="max-h-60 overflow-y-auto custom-scrollbar"></div>
                         </div>
                     </div>
-
-                    <!-- Right: Orders -->
+                </div>
+                
+                <!-- Orders Tab (Hidden by default) -->
+                <div id="admin-orders-tab" class="hidden">
                     <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-cyan-500 h-fit">
                         <div class="flex justify-between mb-6">
                             <h3 class="font-bold flex items-center gap-2"><i class="fas fa-boxes"></i> Recent Orders</h3>
                             <button onclick="loadAdminOrders()" class="text-xs bg-white/10 hover:bg-white/20 px-3 py-1.5 rounded transition"><i class="fas fa-sync-alt"></i></button>
                         </div>
                         <div id="admin-orders" class="max-h-[600px] overflow-y-auto custom-scrollbar"></div>
+                    </div>
+                </div>
+                
+                <!-- Support Tab (Hidden by default) -->
+                <div id="admin-support-tab" class="hidden">
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Waiting Users -->
+                        <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-yellow-500">
+                            <h3 class="font-bold mb-4 flex items-center gap-2">
+                                <i class="fas fa-clock text-yellow-400"></i>
+                                Waiting Users
+                                <span id="waiting-count" class="bg-yellow-500/20 text-yellow-400 text-xs px-2 py-1 rounded">0</span>
+                            </h3>
+                            <div id="admin-waiting-users" class="space-y-2 max-h-80 overflow-y-auto custom-scrollbar">
+                                <!-- Waiting users will appear here -->
+                            </div>
+                        </div>
+                        
+                        <!-- Active Chats -->
+                        <div class="glass-panel p-6 rounded-2xl border-t-4 border-t-green-500">
+                            <h3 class="font-bold mb-4 flex items-center gap-2">
+                                <i class="fas fa-comments text-green-400"></i>
+                                Active Chats
+                                <span id="active-chats-count" class="bg-green-500/20 text-green-400 text-xs px-2 py-1 rounded">0</span>
+                            </h3>
+                            <div id="admin-active-chats" class="space-y-2 max-h-80 overflow-y-auto custom-scrollbar">
+                                <!-- Active chats will appear here -->
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1938,7 +2914,7 @@
                             <div class="space-y-4">
                                 <div>
                                     <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Order ID (Optional)</label>
-                                    <input id="ticket-order-id" type="text" placeholder="LQ-XXXXXX" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition">
+                                    <input id="ticket-order-id" type="text" placeholder="ST-XXXXXX" class="w-full bg-black/30 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white focus:border-cyan-500 outline-none transition">
                                 </div>
                                 <div>
                                     <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Subject *</label>
@@ -1962,28 +2938,7 @@
                     <!-- Sidebar -->
                     <div class="w-full md:w-1/3">
                         <div id="profile-sidebar" class="glass-panel p-8 rounded-3xl text-center md:sticky md:top-24">
-                            <div class="w-24 h-24 bg-gradient-to-br from-cyan-500 to-purple-500 rounded-full mx-auto mb-6 shadow-2xl shadow-purple-500/20"></div>
-                            <h3 class="font-bold text-xl mb-1">My Account</h3>
-                            <p class="text-white/50 text-sm mb-8">Member since 2025</p>
-                            
-                            <div class="space-y-2 text-left">
-                                <button class="w-full p-3 bg-white/10 rounded-xl text-sm font-bold flex justify-between items-center border border-white/10">
-                                    <span>My Orders</span>
-                                    <i class="fas fa-chevron-right text-xs opacity-50"></i>
-                                </button>
-                                <button onclick="navigateTo('explore')" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium flex justify-between items-center transition">
-                                    <span>Rate Products</span>
-                                    <i class="fas fa-star text-yellow-400"></i>
-                                </button>
-                                <button onclick="navigateTo('support')" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium flex justify-between items-center transition">
-                                    <span>Support</span>
-                                    <i class="fas fa-headset"></i>
-                                </button>
-                                <button onclick="handleLogout()" class="w-full p-3 hover:bg-white/5 rounded-xl text-sm font-medium text-red-400 flex justify-between items-center transition">
-                                    <span>Sign Out</span>
-                                    <i class="fas fa-sign-out-alt"></i>
-                                </button>
-                            </div>
+                            <!-- Profile content will be populated by JS -->
                         </div>
                     </div>
                     <!-- Content -->
@@ -2321,6 +3276,68 @@
                     </button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <!-- ADMIN CHAT MODAL -->
+    <div id="admin-chat-modal" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-xl p-4">
+        <div class="glass-card p-6 rounded-3xl w-full max-w-4xl relative shadow-2xl shadow-cyan-900/20 border border-white/10 h-[80vh] flex flex-col">
+            <button onclick="closeAdminChat()" class="absolute top-6 right-6 text-white/30 hover:text-white transition z-10"><i class="fas fa-times text-xl"></i></button>
+            
+            <div class="flex flex-col lg:flex-row h-full">
+                <!-- Chat Messages -->
+                <div class="w-full lg:w-2/3 flex flex-col h-full">
+                    <!-- Chat Header -->
+                    <div class="flex justify-between items-center mb-4 pb-4 border-b border-white/10">
+                        <div>
+                            <h3 class="font-bold text-lg" id="admin-chat-user-name">Customer Name</h3>
+                            <p class="text-sm text-white/50" id="admin-chat-user-email">customer@email.com</p>
+                        </div>
+                        <span id="admin-chat-status" class="bg-yellow-500/20 text-yellow-400 px-2 py-1 rounded text-xs">Waiting</span>
+                    </div>
+                    
+                    <!-- Messages Container -->
+                    <div id="admin-chat-messages" class="flex-grow overflow-y-auto mb-4 p-2 space-y-3 custom-scrollbar">
+                        <!-- Messages will appear here -->
+                    </div>
+                    
+                    <!-- Message Input -->
+                    <div class="mt-auto">
+                        <div class="flex gap-2">
+                            <input id="admin-chat-input" type="text" placeholder="Type your response..." class="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder-white/30 focus:outline-none focus:border-cyan-500 transition">
+                            <button onclick="adminSendChatMessage()" class="bg-cyan-500 hover:bg-cyan-600 text-white px-6 rounded-xl font-medium transition">
+                                Send
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- User Info Sidebar -->
+                <div class="w-full lg:w-1/3 lg:border-l lg:border-white/10 lg:pl-6 mt-6 lg:mt-0">
+                    <h4 class="font-bold mb-4">Customer Information</h4>
+                    
+                    <div class="space-y-4">
+                        <div>
+                            <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Recent Orders</label>
+                            <div id="admin-chat-orders" class="space-y-2 max-h-40 overflow-y-auto custom-scrollbar">
+                                <!-- Orders will appear here -->
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label class="text-xs text-white/50 uppercase font-bold mb-1 block">Chat Actions</label>
+                            <div class="space-y-2">
+                                <button onclick="closeAdminChat()" class="w-full bg-white/5 hover:bg-white/10 px-4 py-2 rounded-lg text-sm font-medium transition border border-white/10">
+                                    <i class="fas fa-times mr-2"></i> Close Chat
+                                </button>
+                                <button class="w-full bg-green-500/20 hover:bg-green-500/30 text-green-400 px-4 py-2 rounded-lg text-sm font-medium transition border border-green-500/30">
+                                    <i class="fas fa-check mr-2"></i> Mark Resolved
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
